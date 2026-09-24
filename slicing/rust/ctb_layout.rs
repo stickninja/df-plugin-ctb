@@ -298,13 +298,44 @@ pub(super) fn build_ctb_container_bytes_with_progress(
     prepared: &[CtbPreparedLayer],
     on_progress: Option<&dyn Fn(u32, u32)>,
 ) -> Result<Vec<u8>, SlicerV3Error> {
+    let plan = super::ctb_layer_plan::parse(job)?;
+    let mut shifted;
+    let prepared = if let Some(plan) = &plan {
+        if prepared.len() != plan.model_layer_count as usize || prepared.iter().enumerate().any(|(i, layer)| layer.index != i) {
+            return Err(SlicerV3Error::UnsupportedOutput("CTB layer plan does not match prepared model images".into()));
+        }
+        if plan.startup_dummy {
+            let key = super::ctb_metadata::parse_ctb_build_model_from_job(job).layer_xor_key;
+            let pixels = (job.source_width_px as usize).checked_mul(job.source_height_px as usize)
+                .filter(|v| *v > 0).ok_or_else(|| SlicerV3Error::UnsupportedOutput("Invalid CTB image dimensions".into()))?;
+            let mut first_rle = prepared[0].encoded.clone();
+            ctb_layer_rle_xor(key, 0, &mut first_rle);
+            let first_mask = super::decode_ctb_rle(&first_rle, pixels);
+            let pixel = first_mask.iter().position(|v| *v > 0).unwrap_or(pixels / 2);
+            let mut dummy_rle = Vec::new();
+            if pixel > 0 { push_ctb_run(&mut dummy_rle, pixel as u32, 0); }
+            push_ctb_run(&mut dummy_rle, 1, 128);
+            if pixel + 1 < pixels { push_ctb_run(&mut dummy_rle, (pixels - pixel - 1) as u32, 0); }
+            ctb_layer_rle_xor(key, 0, &mut dummy_rle);
+            shifted = Vec::with_capacity(prepared.len() + 1);
+            shifted.push(CtbPreparedLayer { index: 0, source_len: pixels, encoded: dummy_rle });
+            for layer in prepared {
+                let mut layer = layer.clone();
+                ctb_layer_rle_xor(key, layer.index as u32, &mut layer.encoded);
+                layer.index += 1;
+                ctb_layer_rle_xor(key, layer.index as u32, &mut layer.encoded);
+                shifted.push(layer);
+            }
+            shifted.as_slice()
+        } else { prepared }
+    } else { prepared };
     let force_encrypted = parse_ctb_format_version_hint_from_job(job)
         .map(|(_, is_encrypted)| is_encrypted)
         .unwrap_or(false);
 
     if force_encrypted {
-        build_ctb_v5enc_with_progress(job, prepared, on_progress)
+        build_ctb_v5enc_with_progress(job, prepared, on_progress, plan.as_ref())
     } else {
-        build_ctb_v5_with_progress(job, prepared, on_progress)
+        build_ctb_v5_with_progress(job, prepared, on_progress, plan.as_ref())
     }
 }

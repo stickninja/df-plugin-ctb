@@ -3,6 +3,11 @@ mod ctb_layout;
 mod ctb_metadata;
 mod ctb_preview;
 mod ctb_types;
+mod ctb_layer_plan;
+mod ctb_readback;
+pub use ctb_readback::{read_ctb_layer_settings_from_bytes, read_ctb_layer_settings_from_file, CtbStoredLayerSettings};
+#[cfg(test)]
+mod ctb_plan_tests;
 //mod ctb_v5;
 //mod ctb_v5enc;
 mod ctb_encoder;

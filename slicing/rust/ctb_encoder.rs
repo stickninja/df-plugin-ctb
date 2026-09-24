@@ -79,6 +79,7 @@ fn write_ctb_header(
     print_time_sec: u32,
     slicer_offset: u32,
     slicer_size: u32,
+    physical_layer_count: u32,
 ) {
     push_u32(out, magic);
     push_u32(out, version);
@@ -87,7 +88,7 @@ fn write_ctb_header(
     push_f32(out, build.bed_size_z_mm.max(0.0));
     push_u32(out, build.created_date_unix);
     push_u32(out, build.modified_date_unix);
-    push_f32(out, job.layer_height_mm * layer_count as f32);
+    push_f32(out, job.layer_height_mm * physical_layer_count as f32);
     push_f32(out, job.layer_height_mm);
     push_f32(out, timing.normal_exposure_sec);
     push_f32(out, timing.bottom_exposure_sec);
@@ -317,6 +318,7 @@ fn write_layer_def_ex(
     layer_data_abs_offset: u64,
     layout: LayerDefLayout,
     is_bottom: bool,
+    resolved: Option<&super::ctb_layer_plan::CtbResolvedLayer>,
 ) {
     let (page_number, data_offset) = page_number_and_offset(layer_data_abs_offset);
 
@@ -401,12 +403,28 @@ fn write_layer_def_ex(
     };
 
 
+    // A feature-enabled plan is already resolved; serialize all four timing
+    // values independently without legacy mode-dependent inference.
+    let position_z_mm = resolved.map_or(position_z_mm, |v| v.position_z_mm);
+    let exposure_sec = resolved.map_or(exposure_sec, |v| v.exposure_sec);
+    let light_off_sec = resolved.map_or(light_off_sec, |v| v.light_off_delay_sec);
+    let lift_distance = resolved.map_or(lift_distance, |v| v.lift_distance_mm);
+    let lift_distance2 = resolved.map_or(lift_distance2, |v| v.lift_distance2_mm);
+    let lift_speed = resolved.map_or(lift_speed, |v| v.lift_speed_mm_min);
+    let lift_speed2 = resolved.map_or(lift_speed2, |v| v.lift_speed2_mm_min);
+    let retract_speed = resolved.map_or(retract_speed, |v| v.retract_speed_mm_min);
+    let retract_speed2 = resolved.map_or(retract_speed2, |v| v.retract_speed2_mm_min);
+    let wait_time_before_cure = resolved.map_or(wait_time_before_cure, |v| v.wait_time_before_cure_sec);
+    let wait_time_after_cure = resolved.map_or(wait_time_after_cure, |v| v.wait_time_after_cure_sec);
+    let wait_time_after_lift = resolved.map_or(wait_time_after_lift, |v| v.wait_time_after_lift_sec);
+    let projector_duty_cycle_pwm = resolved.map_or(projector_duty_cycle_pwm, |v| v.pwm);
+
     // Per-layer CTBv4/v5 semantics follow Chitubox/UVtools LayerDefEx:
     // LiftHeight is total (stage1 + stage2), RetractHeight2 is stage2 retract distance.
     let lift_height_1 = clamp_non_negative(lift_distance);
     let lift_height_2 = clamp_non_negative(lift_distance2);
     let lift_height_total = clamp_non_negative(lift_height_1 + lift_height_2);
-    let retract_height_2 = clamp_non_negative(timing.retract_distance2_mm).min(lift_height_total);
+    let retract_height_2 = clamp_non_negative(resolved.map_or(timing.retract_distance2_mm, |v| v.retract_distance2_mm)).min(lift_height_total);
     
     
     match layout {
@@ -480,9 +498,11 @@ pub(super) fn build_ctb_container_bytes_with_progress(
     job: &SliceJobV3,
     prepared: &[CtbPreparedLayer],
     on_progress: Option<&dyn Fn(u32, u32)>,
+    plan: Option<&super::ctb_layer_plan::CtbLayerPlan>,
 ) -> Result<Vec<u8>, SlicerV3Error> {
-    let timing = parse_timing_model_from_metadata(&job.metadata_json);
-    let build = parse_ctb_build_model_from_job(job);
+    let mut timing = parse_timing_model_from_metadata(&job.metadata_json);
+    let mut build = parse_ctb_build_model_from_job(job);
+    if let Some(plan) = &plan { plan.apply_header(&mut timing); build.per_layer_settings = true; }
     let caps = ctb_version_caps(build.version);
     let resin = parse_ctb_resin_model_from_job(job, &build.machine_name);
 
@@ -546,7 +566,7 @@ pub(super) fn build_ctb_container_bytes_with_progress(
     let mut layer_defs_data = Vec::with_capacity(prepared.len() * CTB_LAYER_DEF_EX_SIZE as usize);
     let mut layer_payload_data = Vec::new();
 
-    let print_time_sec = compute_print_time_seconds(prepared.len(), timing);
+    let print_time_sec = plan.as_ref().map_or_else(|| compute_print_time_seconds(prepared.len(), timing), |v| v.print_time_seconds());
 
     let preview_offsets = CtbPreviewOffsets {
         large_record_offset: large_preview_record_offset,
@@ -568,6 +588,7 @@ pub(super) fn build_ctb_container_bytes_with_progress(
         print_time_sec,
         slicer_offset,
         slicer_size,
+        if plan.is_some() { job.total_layers } else { layer_count },
     );
 
     assert_eq!(out.len(), CTB_HEADER_SIZE as usize);
@@ -672,6 +693,7 @@ pub(super) fn build_ctb_container_bytes_with_progress(
             layer_data_abs,
             layout,
             is_bottom,
+            plan.as_ref().map(|v| &v.layers[idx]),
         );
 
         if caps.extended_layer_def {
@@ -709,6 +731,7 @@ fn write_encrypted_settings(
     resin_parameters_address: u32,
     layer_pointers_offset: u32,
     checksum_value: u64,
+    physical_layer_count: u32,
 ) {
     // CTB print-parameter lift heights are TOTAL heights (stage1 + stage2).
     let bottom_lift_total_mm = timing.bottom_lift_distance_mm + timing.bottom_lift_distance2_mm;
@@ -721,7 +744,7 @@ fn write_encrypted_settings(
     push_f32(out, build.bed_size_z_mm.max(0.0));
     push_u32(out, build.created_date_unix);
     push_u32(out, build.modified_date_unix);
-    push_f32(out, job.layer_height_mm * layer_count as f32);
+    push_f32(out, job.layer_height_mm * physical_layer_count as f32);
     push_f32(out, job.layer_height_mm);
     push_f32(out, timing.normal_exposure_sec);
     push_f32(out, timing.bottom_exposure_sec);
@@ -816,9 +839,11 @@ pub(super) fn build_ctb_encrypted_container_bytes_with_progress(
     job: &SliceJobV3,
     prepared: &[CtbPreparedLayer],
     on_progress: Option<&dyn Fn(u32, u32)>,
+    plan: Option<&super::ctb_layer_plan::CtbLayerPlan>,
 ) -> Result<Vec<u8>, SlicerV3Error> {
-    let timing = parse_timing_model_from_metadata(&job.metadata_json);
+    let mut timing = parse_timing_model_from_metadata(&job.metadata_json);
     let mut build = parse_ctb_build_model_from_job(job);
+    if let Some(plan) = &plan { plan.apply_header(&mut timing); build.per_layer_settings = true; }
     // Encrypted format supports V3–V5; clamp to that range, defaulting to V5.
     if build.version < 3 || build.version > 5 {
         build.version = 5;
@@ -830,7 +855,7 @@ pub(super) fn build_ctb_encrypted_container_bytes_with_progress(
     let (key, iv) = ctb_default_key_iv();
 
     let layer_count = prepared.len() as u32;
-    let print_time_sec = compute_print_time_seconds(prepared.len(), timing);
+    let print_time_sec = plan.as_ref().map_or_else(|| compute_print_time_seconds(prepared.len(), timing), |v| v.print_time_seconds());
     let machine_name_bytes = build.machine_name.as_bytes().to_vec();
     let machine_name_size = machine_name_bytes.len() as u32;
 
@@ -884,7 +909,7 @@ pub(super) fn build_ctb_encrypted_container_bytes_with_progress(
         layer_pointer_entries.push((layer_offset, layer_page));
 
         let is_bottom = (layer.index as u32) < timing.bottom_layer_count;
-        write_layer_def_ex(&mut out, layer, (layer.index as f32 + 1.0) * job.layer_height_mm, timing, layer_data_abs, LayerDefLayout::Encrypted, is_bottom);
+        write_layer_def_ex(&mut out, layer, (layer.index as f32 + 1.0) * job.layer_height_mm, timing, layer_data_abs, LayerDefLayout::Encrypted, is_bottom, plan.as_ref().map(|v| &v.layers[idx]));
         out.extend_from_slice(&layer.encoded);
 
         if let Some(progress) = on_progress {
@@ -918,7 +943,7 @@ pub(super) fn build_ctb_encrypted_container_bytes_with_progress(
     }
 
     let mut settings = Vec::with_capacity(CTB_ENCRYPTED_SETTINGS_SIZE as usize);
-    write_encrypted_settings(&mut settings, &build, job, timing, layer_count, print_time_sec, large_preview_offset, small_preview_offset, machine_name_offset, machine_name_size, disclaimer_offset, resin_parameters_address, layer_pointers_offset, checksum_value);
+    write_encrypted_settings(&mut settings, &build, job, timing, layer_count, print_time_sec, large_preview_offset, small_preview_offset, machine_name_offset, machine_name_size, disclaimer_offset, resin_parameters_address, layer_pointers_offset, checksum_value, if plan.is_some() { job.total_layers } else { layer_count });
     if settings.len() != CTB_ENCRYPTED_SETTINGS_SIZE as usize {
         return Err(SlicerV3Error::UnsupportedOutput(format!(
             "internal encrypted CTB settings size mismatch: expected {}, got {}",
