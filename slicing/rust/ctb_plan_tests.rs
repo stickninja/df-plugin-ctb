@@ -273,3 +273,58 @@ fn simple_plan_preserves_waits_and_zero_stage_two_independently() {
     assert_eq!(actual.wait_time_before_cure_sec, 2.0);
     assert_eq!(actual.wait_time_after_cure_sec, 0.3);
 }
+
+/// Run after scripts/generate-phase4-ctb-plans.ts with DF_CTB_PHASE4_PLAN_DIR set.
+/// Uses actual frontend resolution rather than reimplementing its range rules in Rust.
+#[test]
+#[ignore = "requires generated frontend plans in DF_CTB_PHASE4_PLAN_DIR"]
+fn phase4_frontend_motion_plans_encode_and_decode() {
+    let dir = std::path::PathBuf::from(
+        std::env::var_os("DF_CTB_PHASE4_PLAN_DIR").expect("frontend plan directory"),
+    );
+    for version in ["v4", "v5", "v4enc", "v5enc"] {
+        for mode in ["simple", "twostage"] {
+            for dummy in [false, true] {
+                let name = format!("phase4-{version}-{mode}-dummy-{dummy}");
+                let generated: Value = serde_json::from_slice(
+                    &std::fs::read(dir.join(format!("{name}.json"))).unwrap(),
+                )
+                .unwrap();
+                let (mut job, prepared, _) = fixture(version, dummy);
+                job.metadata_json = generated["metadata"].to_string();
+                let plan = ctb_layer_plan::parse(&job).unwrap().unwrap();
+                assert_eq!(
+                    plan.print_time_seconds(),
+                    generated["expectedEstimateSeconds"].as_u64().unwrap() as u32
+                );
+                let bytes = build_ctb_container_bytes(&job, &prepared).unwrap();
+                for (index, expected) in plan.layers.iter().enumerate() {
+                    let actual =
+                        read_ctb_layer_settings_from_bytes(&bytes, index as u32 + 1).unwrap();
+                    for (value, expected_value) in [
+                        (actual.lift_distance_mm, expected.lift_distance_mm),
+                        (actual.lift_distance2_mm, expected.lift_distance2_mm),
+                        (actual.lift_speed_mm_min, expected.lift_speed_mm_min),
+                        (actual.lift_speed2_mm_min, expected.lift_speed2_mm_min),
+                        (actual.retract_distance2_mm, expected.retract_distance2_mm),
+                        (actual.retract_speed_mm_min, expected.retract_speed_mm_min),
+                        (actual.retract_speed2_mm_min, expected.retract_speed2_mm_min),
+                        (actual.light_off_delay_sec, expected.light_off_delay_sec),
+                        (
+                            actual.wait_time_before_cure_sec,
+                            expected.wait_time_before_cure_sec,
+                        ),
+                        (actual.position_z_mm, expected.position_z_mm),
+                    ] {
+                        assert!(
+                            (value - expected_value).abs() < 0.0001,
+                            "{name}, layer {}: {value} != {expected_value}",
+                            index + 1
+                        );
+                    }
+                }
+                std::fs::write(dir.join(format!("{name}.ctb")), bytes).unwrap();
+            }
+        }
+    }
+}
