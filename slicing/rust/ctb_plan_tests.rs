@@ -274,6 +274,64 @@ fn simple_plan_preserves_waits_and_zero_stage_two_independently() {
     assert_eq!(actual.wait_time_after_cure_sec, 0.3);
 }
 
+#[test]
+fn pwm_records_preserve_zero_quantization_and_full_power_in_every_variant() {
+    for version in ["v4", "v5", "v4enc", "v5enc"] {
+        for dummy in [false, true] {
+            let (mut job, prepared, _) = fixture(version, dummy);
+            let mut meta: Value = serde_json::from_str(&job.metadata_json).unwrap();
+            let offset = usize::from(dummy);
+            let expected = [0, 1, 128, 255];
+            for (index, pwm) in expected.iter().enumerate() {
+                meta["ctb"]["layerPlanV1"]["layers"][index + offset]["pwm"] = json!(pwm);
+            }
+            job.metadata_json = meta.to_string();
+            let bytes = build_ctb_container_bytes(&job, &prepared).unwrap();
+            for (index, pwm) in expected.iter().enumerate() {
+                let actual = read_ctb_layer_settings_from_bytes(&bytes, (index + offset + 1) as u32).unwrap();
+                assert!(actual.per_layer_settings);
+                assert_eq!(actual.pwm, *pwm, "{version}, model layer {}", index + 1);
+            }
+            if dummy {
+                assert_eq!(read_ctb_layer_settings_from_bytes(&bytes, 1).unwrap().pwm, 1);
+            }
+            for invalid in [json!(-1), json!(256), json!(1.5), Value::Null] {
+                meta["ctb"]["layerPlanV1"]["layers"][offset]["pwm"] = invalid;
+                job.metadata_json = meta.to_string();
+                assert!(build_ctb_container_bytes(&job, &prepared).is_err());
+            }
+        }
+    }
+}
+
+#[test]
+fn legacy_pwm_defaults_encode_independently_and_accept_historical_bottom_alias() {
+    for version in ["v4", "v5", "v4enc", "v5enc"] {
+        for mode in ["simple", "twostage", "allfields"] {
+            for key in ["bottomProjectorPwmPercent", "bottomLayerProjectorPwmPercent"] {
+                let (mut job, prepared, _) = fixture(version, false);
+                let mut meta: Value = serde_json::from_str(&job.metadata_json).unwrap();
+                meta["ctb"].as_object_mut().unwrap().remove("layerPlanV1");
+                meta["ctb"]["settingsMode"] = json!(mode);
+                meta["ctb"]["projectorPwmPercent"] = json!(100);
+                meta["ctb"][key] = json!(80);
+                job.metadata_json = meta.to_string();
+                let bytes = build_ctb_container_bytes(&job, &prepared).unwrap();
+                for (layer, expected) in [(1, 204), (2, 204), (3, 255), (4, 255)] {
+                    assert_eq!(read_ctb_layer_settings_from_bytes(&bytes, layer).unwrap().pwm, expected,
+                        "{version}, {mode}, {key}, layer {layer}");
+                }
+                // Canonical zero continues to mean full power, even if an alias is present.
+                meta["ctb"]["bottomProjectorPwmPercent"] = json!(0);
+                meta["ctb"]["bottomLayerProjectorPwmPercent"] = json!(80);
+                job.metadata_json = meta.to_string();
+                let bytes = build_ctb_container_bytes(&job, &prepared).unwrap();
+                assert_eq!(read_ctb_layer_settings_from_bytes(&bytes, 1).unwrap().pwm, 255);
+            }
+        }
+    }
+}
+
 /// Run after scripts/generate-phase4-ctb-plans.ts with DF_CTB_PHASE4_PLAN_DIR set.
 /// Uses actual frontend resolution rather than reimplementing its range rules in Rust.
 #[test]
@@ -301,6 +359,8 @@ fn phase4_frontend_motion_plans_encode_and_decode() {
                 for (index, expected) in plan.layers.iter().enumerate() {
                     let actual =
                         read_ctb_layer_settings_from_bytes(&bytes, index as u32 + 1).unwrap();
+                    assert!(actual.per_layer_settings, "{name}, layer {}", index + 1);
+                    assert_eq!(actual.pwm, expected.pwm, "{name}, layer {} PWM", index + 1);
                     for (value, expected_value) in [
                         (actual.lift_distance_mm, expected.lift_distance_mm),
                         (actual.lift_distance2_mm, expected.lift_distance2_mm),

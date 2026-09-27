@@ -160,7 +160,7 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
             .or_else(|| material.and_then(|m| m.get(key)).and_then(Value::as_f64))
             .unwrap_or(0.0) as f32
     };
-    let read_u32 = |key: &str| {
+    let read_optional_u32 = |key: &str| {
         ctb.and_then(|m| m.get(key))
             .and_then(Value::as_u64)
             .or_else(|| ctb_timing.and_then(|m| m.get(key)).and_then(Value::as_u64))
@@ -171,8 +171,9 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
                     .and_then(Value::as_u64)
             })
             .or_else(|| material.and_then(|m| m.get(key)).and_then(Value::as_u64))
-            .unwrap_or(0) as u32
+            .map(|value| value as u32)
     };
+    let read_u32 = |key: &str| read_optional_u32(key).unwrap_or(0);
 
     let mut timing = CtbTimingModel {
         normal_exposure_sec: read_f32("normalExposureSec"),
@@ -204,7 +205,10 @@ pub(super) fn parse_timing_model_from_metadata(metadata_json: &str) -> CtbTiming
         bottom_wait_time_after_cure_sec: read_f32("bottomWaitTimeAfterCureSec"),
         bottom_wait_time_after_lift_sec: read_f32("bottomWaitTimeAfterLiftSec"),
         projector_duty_cycle_pwm: ((read_u32("projectorPwmPercent") as f32) * 2.55) as u16,
-        bottom_layer_projector_duty_cycle_pwm : ((read_u32("bottomProjectorPwmPercent") as f32) * 2.55) as u16,
+        // Accept the historical material-schema metadata path as an alias.
+        bottom_layer_projector_duty_cycle_pwm: ((read_optional_u32("bottomProjectorPwmPercent")
+            .or_else(|| read_optional_u32("bottomLayerProjectorPwmPercent"))
+            .unwrap_or(0) as f32) * 2.55) as u16,
     };
 
     let sanitize_non_negative = |value: f32| {

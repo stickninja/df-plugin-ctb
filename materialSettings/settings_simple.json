@@ -183,6 +183,17 @@
       "step": 1,
       "placement": { "tabId": "simple", "sectionId": "light", "cardId": "light-settings", "order": 70 },
       "metadataPath": "ctb.projectorPwmPercent"
+    },
+    {
+      "key": "bottomProjectorPwmPercent",
+      "label": "Burn-in Projector PWM (%)",
+      "kind": "number",
+      "defaultValue": 100,
+      "min": 1,
+      "max": 100,
+      "step": 1,
+      "placement": { "tabId": "simple", "sectionId": "light", "cardId": "light-settings", "order": 75 },
+      "metadataPath": "ctb.bottomProjectorPwmPercent"
     }
   ]
 }
